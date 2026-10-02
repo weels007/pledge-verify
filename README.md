@@ -7,7 +7,7 @@
 [![GenLayer](https://img.shields.io/badge/Built%20on-GenLayer-6366f1?style=for-the-badge&logo=genlayer)](https://genlayer.com)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Equivalence](https://img.shields.io/badge/Equivalence%20Principle-OK-16a34a?style=for-the-badge)](https://docs.genlayer.com/developers/intelligent-contracts/equivalence-principle)
-[![Tests](https://img.shields.io/badge/tests-14%20passed-16a34a?style=for-the-badge)](https://github.com/)
+[![Tests](https://img.shields.io/badge/tests-17%20passed-16a34a?style=for-the-badge)](https://github.com/)
 
 ---
 
@@ -38,10 +38,10 @@
 ## Consensus design
 
 PledgeVerify uses `run_nondet_unsafe` with the Equivalence Principle:
-- **Leader**: scores proof of impact via LLM evaluation against pledge purpose.
-- **Validator**: independently scores the same proof and compares `(verified, proof_score)` decision fields.
-- Consensus requires agreement on both fields. Mismatches trigger rotation.
-- Error classification: `[EXPECTED]` for deterministic errors (exact match), `[TRANSIENT]` for network errors (agree if both), `[LLM]` for LLM errors (always disagree, force rotation).
+- **Leader**: fetches the actual evidence from the proof URL via `gl.nondet.web.get()`, then scores the fetched content + description against the pledge purpose via LLM.
+- **Validator**: independently fetches the same URL and re-scores the retrieved evidence, then compares `(verified, proof_score)` decision fields.
+- Both leader and validators assess retrieved evidence — never just the URL string or description.
+- Error classification: `[EXPECTED]` for deterministic errors (exact match), `[EXTERNAL]` for 4xx responses (exact match), `[TRANSIENT]` for 5xx/network errors (agree if both), `[LLM]` for LLM errors (always disagree, force rotation).
 
 ---
 
@@ -79,7 +79,7 @@ pytest tests/ -v
  genvm-lint check contracts/pledge_verify.py
 ```
 
-14 GenVM direct-mode tests pass. Lint passes. Validate fails due to known SDK bug (missing runner tar). E2E test passes on studionet (register_recipient, get_recipient_pledges). Deployed to studionet.
+17 GenVM direct-mode tests pass. Lint passes. Validate passes. E2E test passes on studionet (register_recipient, get_recipient_pledges). Deployed to studionet.
 
 ---
 
@@ -87,11 +87,11 @@ pytest tests/ -v
 
 [![Explore](https://img.shields.io/badge/Explore-Studionet-6366f1?style=for-the-badge)](https://genlayer-explorer.vercel.app)
 
-**Address:** `0xa67323a35F332f604E9c0EB31CF8a0cB5997a336`
+**Address:** `0x61bDa431118feeb10e7535d75cb256CFf0f81CCF`
 **Chain:** Studionet (Genlayer Studio Network)
 **Deployer:** `0x689759bb926E032EAfb1eE986eD7A98C1496ec1c`
-**Tx:** `0xbaf911bf5902aaa68f947c5c2992a0c9455c5835a2b661975f4438691f41bed3`
-**Status:** Deployed and tested on studionet. E2E test passes (register_recipient, get_recipient_pledges). 14/14 direct-mode tests pass. All functions operational: register_recipient, create_pledge, submit_proof, verify_pledge, views.
+**Tx:** `0xca41ac953f192873ad66211683fb78e0addde8b513da76bae66d8ae3d2282347`
+**Status:** Deployed and tested on studionet. E2E test passes (register_recipient, get_recipient_pledges). 17/17 direct-mode tests pass. All functions operational: register_recipient, create_pledge, submit_proof, verify_pledge, views.
 
 ---
 
