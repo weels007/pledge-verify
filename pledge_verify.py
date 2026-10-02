@@ -410,11 +410,28 @@ class PledgeVerify(gl.Contract):
         return pledges
 
 
+def _fetch_proof_evidence(url: str) -> str:
+    if not _validate_url(url):
+        raise gl.vm.UserError(ERROR_EXPECTED + "invalid url")
+    try:
+        res = gl.nondet.web.get(url)
+        if res.status >= 400 and res.status < 500:
+            raise gl.vm.UserError(ERROR_EXTERNAL + f"URL returned {res.status}")
+        elif res.status >= 500:
+            raise gl.vm.UserError(ERROR_TRANSIENT + f"URL temporarily unavailable ({res.status})")
+        return (res.body or b"").decode("utf-8", errors="replace")[:MAX_PROOF_CHARS]
+    except gl.vm.UserError:
+        raise
+    except Exception:
+        raise gl.vm.UserError(ERROR_TRANSIENT + "URL fetch failed")
+
+
 def _run_pledge_consensus(pledge_id: str, pledge: Pledge, proof: Proof) -> dict:
     def leader_fn():
         purpose = pledge.purpose
-        content = f"url: {proof.url}\ndescription: {proof.description}"
-        score = _score_proof(purpose, content)
+        content = _fetch_proof_evidence(proof.url)
+        evidence = f"URL: {proof.url}\nFetched content:\n{content}\n\nDescription: {proof.description}"
+        score = _score_proof(purpose, evidence)
         verified = score >= MIN_SCORE
         return {
             "verified": verified,
