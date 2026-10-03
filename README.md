@@ -7,7 +7,7 @@
 [![GenLayer](https://img.shields.io/badge/Built%20on-GenLayer-6366f1?style=for-the-badge&logo=genlayer)](https://genlayer.com)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Equivalence](https://img.shields.io/badge/Equivalence%20Principle-OK-16a34a?style=for-the-badge)](https://docs.genlayer.com/developers/intelligent-contracts/equivalence-principle)
-[![Tests](https://img.shields.io/badge/tests-17%20passed-16a34a?style=for-the-badge)](https://github.com/)
+[![Tests](https://img.shields.io/badge/tests-23%20passed-16a34a?style=for-the-badge)](https://github.com/)
 
 ---
 
@@ -60,9 +60,10 @@ PledgeVerify establishes patterns that can be reused in other contracts:
 
 ## Security & audit
 
-- **Signature verification**: registration and proof submission require EIP-191 signatures verified on-chain via pure-Python secp256k1 ecrecover.
+- **Signature verification**: registration and proof submission require EIP-191 signatures verified on-chain via pure-Python secp256k1 ecrecover; `register_recipient` additionally requires the recovered signer to equal the transaction sender.
 - **Proof access control**: only the recipient can submit proof for their pledge.
-- **SSRF blocklist**: proof URL validation blocks localhost, private networks, cloud metadata.
+- **SSRF policy**: proof URLs are parsed with `urllib.parse` and host-checked with `ipaddress` — blocks private/loopback/link-local/reserved/multicast IPv4+IPv6 (incl. CGNAT), decimal/hex/octal numeric IP literals, userinfo, control characters, backslashes, and `.local`/`.internal`/`.localhost`/`.nip.io`/`.sslip.io`/`metadata.google` hosts.
+- **Redirect validation**: `_fetch_proof_evidence` follows at most 5 redirects, resolving relative `Location` headers and re-validating every hop against the same SSRF policy.
 - **AST sandbox**: proof scoring uses LLM with structured JSON output only.
 - **Pledge status machine**: verified transition requires consensus; cannot release without validator agreement.
 - **Input validation**: purpose length limits, amount must be positive, deadline must be in future, URL format validated.
@@ -79,7 +80,7 @@ pytest tests/ -v
  genvm-lint check contracts/pledge_verify.py
 ```
 
-17 GenVM direct-mode tests pass. Lint passes. Validate passes. E2E test passes on studionet (register_recipient, get_recipient_pledges). Deployed to studionet.
+23 GenVM direct-mode tests pass. Lint passes. Validate passes. E2E test passes on studionet (register_recipient, get_recipient_pledges). Deployed to studionet.
 
 ---
 
@@ -87,11 +88,11 @@ pytest tests/ -v
 
 [![Explore](https://img.shields.io/badge/Explore-Studionet-6366f1?style=for-the-badge)](https://genlayer-explorer.vercel.app)
 
-**Address:** `0x61bDa431118feeb10e7535d75cb256CFf0f81CCF`
+**Address:** `0xed2592E7f97fbC693c76Fe35B2314fF7d405fc67`
 **Chain:** Studionet (Genlayer Studio Network)
 **Deployer:** `0x689759bb926E032EAfb1eE986eD7A98C1496ec1c`
-**Tx:** `0xca41ac953f192873ad66211683fb78e0addde8b513da76bae66d8ae3d2282347`
-**Status:** Deployed and tested on studionet. E2E test passes (register_recipient, get_recipient_pledges). 17/17 direct-mode tests pass. All functions operational: register_recipient, create_pledge, submit_proof, verify_pledge, views.
+**Tx:** `0x77db809a72161693a54d79ff84e37297304afc16c9c52ea3625b52af9b5903d9`
+**Status:** Deployed and tested on studionet. E2E test passes (register_recipient, get_recipient_pledges). 23/23 direct-mode tests pass. All functions operational: register_recipient, create_pledge, submit_proof, verify_pledge, views.
 
 ---
 
