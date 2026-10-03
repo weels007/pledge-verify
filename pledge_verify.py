@@ -15,6 +15,8 @@ Unique patterns:
 
 import json
 import re
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from datetime import datetime, timezone
 from dataclasses import dataclass
 
@@ -167,8 +169,74 @@ def _signer_of(sign_msg: str, signature: str):
 
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-_BLOCKED_HOST_RE = re.compile(r"(localhost|127\.0\.0\.1|0\.0\.0\.0|\.internal|\.local|metadata\.googleapis|169\.254\.)", re.IGNORECASE)
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]")
+_BLOCKED_HOST_SUFFIXES = (".local", ".internal", ".localhost", ".nip.io", ".sslip.io")
+_BLOCKED_HOST_KEYWORDS = ("localhost", "metadata.google")
+_CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _parse_inet_literal(host: str):
+    """Interpret inet_aton-style numeric hosts (decimal/hex/octal, 1-4 parts)."""
+    parts = host.split(".")
+    if not (1 <= len(parts) <= 4):
+        return None
+    nums = []
+    for p in parts:
+        if not p:
+            return None
+        try:
+            if p.lower().startswith("0x"):
+                n = int(p, 16)
+            elif len(p) > 1 and p.startswith("0"):
+                n = int(p, 8)
+            elif p.isdigit():
+                n = int(p, 10)
+            else:
+                return None
+        except ValueError:
+            return None
+        nums.append(n)
+    if len(nums) == 4:
+        if any(n > 255 for n in nums):
+            return None
+        value = (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]
+    elif len(nums) == 3:
+        if nums[0] > 255 or nums[1] > 255 or nums[2] > 0xFFFFFF:
+            return None
+        value = (nums[0] << 16) | (nums[1] << 8) | nums[2]
+    elif len(nums) == 2:
+        if nums[0] > 255:
+            return None
+        value = (nums[0] << 24) | nums[1]
+    else:
+        if nums[0] > 0xFFFFFFFF:
+            return None
+        value = nums[0]
+    if value > 0xFFFFFFFF:
+        return None
+    return f"{(value >> 24) & 0xff}.{(value >> 16) & 0xff}.{(value >> 8) & 0xff}.{value & 0xff}"
+
+
+def _ip_is_blocked(ip) -> bool:
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        return True
+    if ip.version == 4 and ip in _CGNAT_V4:
+        return True
+    return False
+
+
+def _host_is_blocked(host: str) -> bool:
+    host_l = host.lower().rstrip(".")
+    if any(kw in host_l for kw in _BLOCKED_HOST_KEYWORDS):
+        return True
+    if any(host_l.endswith(sfx) for sfx in _BLOCKED_HOST_SUFFIXES):
+        return True
+    candidate = _parse_inet_literal(host_l) or host_l
+    try:
+        ip = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return _ip_is_blocked(ip)
 
 
 def _validate_url(url: str) -> bool:
@@ -178,9 +246,20 @@ def _validate_url(url: str) -> bool:
         return False
     if _CONTROL_RE.search(url):
         return False
-    if _BLOCKED_HOST_RE.search(url):
+    if "\\" in url:
         return False
-    return True
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+    if not host:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    return not _host_is_blocked(host)
 
 
 def _score_proof(purpose: str, proof_content: str) -> int:
@@ -260,12 +339,14 @@ class PledgeVerify(gl.Contract):
         signer = _signer_of(sign_msg, signature)
         if signer is None:
             raise gl.vm.UserError("invalid signature")
-        addr_hex = signer.lower().replace("0x", "")
-        if addr_hex in self.recipients:
-            raise gl.vm.UserError("already registered")
         sender = gl.message.sender_address
+        sender_hex = _addr_hex(sender)
+        if signer != sender_hex:
+            raise gl.vm.UserError("signer must match sender")
+        if sender_hex in self.recipients:
+            raise gl.vm.UserError("already registered")
         ts = _now_ts()
-        self.recipients[addr_hex] = Recipient(address=sender, registered_ts=ts, pledge_count=0)
+        self.recipients[sender_hex] = Recipient(address=sender, registered_ts=ts, pledge_count=0)
 
     @gl.public.write
     def create_pledge(self, recipient: Address, amount: int, purpose: str, deadline_ts: int) -> str:
@@ -410,20 +491,50 @@ class PledgeVerify(gl.Contract):
         return pledges
 
 
+MAX_REDIRECTS = 5
+
+
+def _header_value(res, name: str):
+    try:
+        headers = getattr(res, "headers", None) or {}
+        for k, v in headers.items():
+            if str(k).lower() == name:
+                if isinstance(v, (bytes, bytearray)):
+                    return bytes(v).decode("utf-8", errors="replace")
+                return str(v)
+    except Exception:
+        return None
+    return None
+
+
 def _fetch_proof_evidence(url: str) -> str:
     if not _validate_url(url):
         raise gl.vm.UserError(ERROR_EXPECTED + "invalid url")
-    try:
-        res = gl.nondet.web.get(url)
-        if res.status >= 400 and res.status < 500:
-            raise gl.vm.UserError(ERROR_EXTERNAL + f"URL returned {res.status}")
-        elif res.status >= 500:
-            raise gl.vm.UserError(ERROR_TRANSIENT + f"URL temporarily unavailable ({res.status})")
+    current = url
+    for _hop in range(MAX_REDIRECTS + 1):
+        try:
+            res = gl.nondet.web.get(current)
+        except gl.vm.UserError:
+            raise
+        except Exception:
+            raise gl.vm.UserError(ERROR_TRANSIENT + "URL fetch failed")
+        status = int(res.status)
+        if 300 <= status < 400:
+            location = _header_value(res, "location")
+            if not location:
+                raise gl.vm.UserError(ERROR_EXTERNAL + f"redirect without location ({status})")
+            if _hop == MAX_REDIRECTS:
+                raise gl.vm.UserError(ERROR_EXPECTED + "redirect limit exceeded")
+            current = urljoin(current, location)
+            if not _validate_url(current):
+                raise gl.vm.UserError(ERROR_EXTERNAL + "blocked redirect target")
+            continue
+        if 400 <= status < 500:
+            raise gl.vm.UserError(ERROR_EXTERNAL + f"URL returned {status}")
+        if status >= 500:
+            raise gl.vm.UserError(ERROR_TRANSIENT + f"URL temporarily unavailable ({status})")
         return (res.body or b"").decode("utf-8", errors="replace")[:MAX_PROOF_CHARS]
-    except gl.vm.UserError:
-        raise
-    except Exception:
-        raise gl.vm.UserError(ERROR_TRANSIENT + "URL fetch failed")
+    raise gl.vm.UserError(ERROR_EXPECTED + "redirect limit exceeded")
 
 
 def _run_pledge_consensus(pledge_id: str, pledge: Pledge, proof: Proof) -> dict:
