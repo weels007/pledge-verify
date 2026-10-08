@@ -507,11 +507,84 @@ def _header_value(res, name: str):
     return None
 
 
+def _host_of(url: str):
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
+
+
+def _doh_lookup(name: str, qtype: str) -> list:
+    doh_url = "https://dns.google/resolve?name=" + name + "&type=" + qtype
+    try:
+        res = gl.nondet.web.get(doh_url)
+    except gl.vm.UserError:
+        raise
+    except Exception:
+        raise gl.vm.UserError(ERROR_TRANSIENT + "DNS resolution failed")
+    status = int(res.status)
+    if status >= 500:
+        raise gl.vm.UserError(ERROR_TRANSIENT + "DNS resolution failed")
+    if status >= 400:
+        raise gl.vm.UserError(ERROR_EXTERNAL + f"DNS resolver returned {status}")
+    try:
+        data = json.loads((res.body or b"").decode("utf-8", errors="replace"))
+    except Exception:
+        raise gl.vm.UserError(ERROR_EXTERNAL + "invalid DNS response")
+    if not isinstance(data, dict):
+        raise gl.vm.UserError(ERROR_EXTERNAL + "invalid DNS response")
+    ips = []
+    for ans in (data.get("Answer") or []):
+        if not isinstance(ans, dict):
+            continue
+        if ans.get("type") not in (1, 28):
+            continue
+        ips.append(str(ans.get("data", "")))
+    return ips
+
+
+def _resolve_host_ips(host: str) -> list:
+    host_l = (host or "").lower().rstrip(".")
+    literal = _parse_inet_literal(host_l)
+    if literal:
+        return [literal]
+    try:
+        ipaddress.ip_address(host_l)
+        return [host_l]
+    except ValueError:
+        pass
+    raws = _doh_lookup(host_l, "A") + _doh_lookup(host_l, "AAAA")
+    ips = []
+    for raw in raws:
+        try:
+            ips.append(str(ipaddress.ip_address(raw)))
+        except ValueError:
+            continue
+    return ips
+
+
+def _ensure_resolved_safe(host: str) -> None:
+    ips = _resolve_host_ips(host)
+    if not ips:
+        raise gl.vm.UserError(ERROR_EXTERNAL + "host did not resolve")
+    for raw in ips:
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if _ip_is_blocked(ip):
+            raise gl.vm.UserError(ERROR_EXTERNAL + "resolved address is blocked")
+
+
 def _fetch_proof_evidence(url: str) -> str:
     if not _validate_url(url):
         raise gl.vm.UserError(ERROR_EXPECTED + "invalid url")
     current = url
     for _hop in range(MAX_REDIRECTS + 1):
+        host = _host_of(current)
+        if not host:
+            raise gl.vm.UserError(ERROR_EXTERNAL + "invalid redirect target")
+        _ensure_resolved_safe(host)
         try:
             res = gl.nondet.web.get(current)
         except gl.vm.UserError:
