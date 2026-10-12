@@ -1,13 +1,18 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
-"""PledgeVerify — Charitable Pledge Verification via Proof of Impact
+"""PledgeVerify — Non-Custodial Pledge Attestation via Proof of Impact
 
-> Donors pledge funds to verified recipients who prove their cause.
-> Validators independently verify proof quality under consensus.
-> Funds release only when validators agree on proof validity.
+> Donors declare pledges to verified recipients; recipients prove their impact.
+> Validators independently verify proof quality under consensus and issue an
+> on-chain attestation verdict (verified / rejected).
+>
+> This contract is a non-custodial attestation registry: it never receives,
+> holds, escrows, or transfers funds. `declared_amount` is the donor's
+> declared off-chain pledge commitment, recorded for attestation only — the
+> contract has no custody of it and performs no payout.
 
 Unique patterns:
-  1. Conditional fund release after consensus
+  1. Consensus-gated attestation verdict (non-custodial, no fund movement)
   2. Proof-of-impact verification with SSRF blocklist
   3. Donor-recipient relationship model
   4. Quality scoring in consensus (not just pass/fail)
@@ -29,6 +34,7 @@ MAX_PURPOSE_CHARS = 200
 MAX_DESCRIPTION_CHARS = 500
 MAX_URL_CHARS = 2048
 MIN_SCORE = 60
+SCORE_TOLERANCE = 10
 
 ERROR_LLM = "[LLM] "
 ERROR_EXTERNAL = "[EXTERNAL] "
@@ -302,11 +308,10 @@ class Pledge:
     pledge_id: str
     donor: Address
     recipient: Address
-    amount: u256
+    declared_amount: u256
     purpose: str
     deadline: u256
     status: str
-    released: bool
     proof_score: u256
     created_ts: u256
 
@@ -349,11 +354,11 @@ class PledgeVerify(gl.Contract):
         self.recipients[sender_hex] = Recipient(address=sender, registered_ts=ts, pledge_count=0)
 
     @gl.public.write
-    def create_pledge(self, recipient: Address, amount: int, purpose: str, deadline_ts: int) -> str:
+    def create_pledge(self, recipient: Address, declared_amount: int, purpose: str, deadline_ts: int) -> str:
         if not purpose or len(purpose) > MAX_PURPOSE_CHARS:
             raise gl.vm.UserError(f"purpose must be 1-{MAX_PURPOSE_CHARS} characters")
-        if amount <= 0:
-            raise gl.vm.UserError("amount must be positive")
+        if declared_amount <= 0:
+            raise gl.vm.UserError("declared_amount must be positive")
         if deadline_ts <= _now_ts():
             raise gl.vm.UserError("deadline must be in the future")
         if not hasattr(recipient, "as_bytes"):
@@ -369,11 +374,10 @@ class PledgeVerify(gl.Contract):
             pledge_id=pledge_id,
             donor=sender,
             recipient=recipient,
-            amount=amount,
+            declared_amount=declared_amount,
             purpose=purpose,
             deadline=deadline_ts,
             status="pending",
-            released=False,
             proof_score=0,
             created_ts=ts,
         )
@@ -431,14 +435,8 @@ class PledgeVerify(gl.Contract):
             raise gl.vm.UserError("proof not found")
         proof = self.proofs[proof_key]
         result = _run_pledge_consensus(pledge_id, pledge, proof)
-        ts = _now_ts()
         pledge.proof_score = result["proof_score"]
-        if result["verified"] and _now_ts() <= int(pledge.deadline):
-            pledge.status = "verified"
-            pledge.released = True
-        else:
-            pledge.status = "rejected"
-            pledge.released = False
+        pledge.status = "verified" if result["verified"] else "rejected"
         self.pledges[pledge_id] = pledge
 
     @gl.public.view
@@ -450,11 +448,10 @@ class PledgeVerify(gl.Contract):
             "pledge_id": p.pledge_id,
             "donor": _addr_hex(p.donor),
             "recipient": _addr_hex(p.recipient),
-            "amount": p.amount,
+            "declared_amount": p.declared_amount,
             "purpose": p.purpose,
             "deadline": p.deadline,
             "status": p.status,
-            "released": p.released,
             "proof_score": p.proof_score,
             "created_ts": p.created_ts,
         }
@@ -482,10 +479,9 @@ class PledgeVerify(gl.Contract):
                 pledges.append({
                     "pledge_id": p.pledge_id,
                     "donor": _addr_hex(p.donor),
-                    "amount": p.amount,
+                    "declared_amount": p.declared_amount,
                     "purpose": p.purpose,
                     "status": p.status,
-                    "released": p.released,
                     "proof_score": p.proof_score,
                 })
         return pledges
@@ -610,6 +606,19 @@ def _fetch_proof_evidence(url: str) -> str:
     raise gl.vm.UserError(ERROR_EXPECTED + "redirect limit exceeded")
 
 
+def _fields_agree(mine, theirs) -> bool:
+    if not isinstance(mine, dict) or not isinstance(theirs, dict):
+        return False
+    if mine.get("verified") is not theirs.get("verified"):
+        return False
+    try:
+        my_score = int(mine.get("proof_score", -1))
+        lead_score = int(theirs.get("proof_score", -1))
+    except (ValueError, TypeError):
+        return False
+    return abs(my_score - lead_score) <= SCORE_TOLERANCE
+
+
 def _run_pledge_consensus(pledge_id: str, pledge: Pledge, proof: Proof) -> dict:
     def leader_fn():
         purpose = pledge.purpose
@@ -622,9 +631,6 @@ def _run_pledge_consensus(pledge_id: str, pledge: Pledge, proof: Proof) -> dict:
             "proof_score": score,
         }
 
-    def _decision_fields(data: dict) -> tuple:
-        return (data.get("verified"), int(data.get("proof_score", 0)))
-
     def validator_fn(leader_result):
         if not isinstance(leader_result, gl.vm.Return):
             return _reproduce_leader_error(leader_result, leader_fn)
@@ -632,7 +638,7 @@ def _run_pledge_consensus(pledge_id: str, pledge: Pledge, proof: Proof) -> dict:
         if not isinstance(leader_data, dict):
             return False
         my = leader_fn()
-        return _decision_fields(my) == _decision_fields(leader_data)
+        return _fields_agree(my, leader_data)
 
     return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
